@@ -1,5 +1,6 @@
 import re
 from textwrap import dedent
+from string_editor import LineColEditor
 
 from manim import (
     DOWN,
@@ -27,6 +28,11 @@ def regex_line_span(regex, string, group=1):
     char_stop = char_start + ((m.end(group) - 1) - (m.start(group) - 1))
     return m, lineno, (char_start, char_stop)
 
+class sliceabledict(dict):
+    def __getitem__(self, val):
+        if isinstance(val, slice):
+            return slice(self[val.start], self[val.stop])
+        return super().__getitem__(val)
 
 def make_manim_map(string):
     stripped = re.findall("( +|[^ ])", string)
@@ -36,17 +42,14 @@ def make_manim_map(string):
         for j, _ in enumerate(c):
             char_manim_map[count + j] = i
         count += len(c)
-    return char_manim_map
+    return sliceabledict(char_manim_map)
 
-
-class llist(list):
-    def __getitem__(self, index):
-        return super().__getitem__(index % len(self))
-
+def mid(a: int, b: int) -> int:
+    return a + (abs(a - b) / 2)
 
 class ReplacementCode:
 
-    COLORS = llist(["#FF0000", "#00FF00", "#0000FF", "#FF00FF", "#FFFF00", "#00FFFF"])
+    COLORS = ["#FF0000", "#00FF00", "#0000FF", "#FF00FF", "#FFFF00", "#00FFFF"]
 
     def __init__(self, scene, code):
         self.scene = scene
@@ -54,6 +57,12 @@ class ReplacementCode:
         self.color_index = 0
         self.update(code.replace("\n", " \n"))
 
+    @property
+    def color(self):
+        col = self.COLORS[self.color_index % len(self.COLORS)]
+        self.color_index += 1
+        return col
+    
     def update(self, code):
         if self.code:
             self.scene.remove(self.code)
@@ -66,15 +75,16 @@ class ReplacementCode:
             line_spacing=0.6,
         )
         self.scene.add(self.code)
+    
+    def normalise_col(self, *args):
+        return [(arg, arg + 1) if isinstance(arg, int) else arg for arg in args]
 
-    def show_from_regex(self, source_re, dest_re, alternative_dest=None):
-        source_match, source_line, span = regex_line_span(
-            source_re, self.code.code_string
-        )
-        dest_match, dest_line, span2 = regex_line_span(dest_re, self.code.code_string)
-
+    def decide_directions(self, source_line, source_col, dest_line, dest_col): 
+        source_col, dest_col = self.normalise_col(source_col, dest_col)
+        
         linediff = source_line - dest_line
-        coldiff = span[0] - span2[0]
+        coldiff = mid(*source_col) - mid(*dest_col)
+
         if abs(linediff) > abs(coldiff):
             if linediff > 0:
                 direction = (DOWN, UP)
@@ -85,31 +95,43 @@ class ReplacementCode:
                 direction = (RIGHT, LEFT)
             else:
                 direction = (LEFT, RIGHT)
+        
+        return direction
 
-        st = self.code.code_string
-        source_manim_map = make_manim_map(st[source_match.start() : source_match.end()])
-
-        dest_manim_map = make_manim_map(st[dest_match.start() : dest_match.end()])
-
+    def show_from_spans(self, source_line, source_col, dest_line, dest_col):
+        source_col, dest_col = self.normalise_col(source_col, dest_col)
+        direction = self.decide_directions(source_line, source_col, dest_line, dest_col)
+        lines = LineColEditor(self.code.code_string)
+        
+        source_manim_map = make_manim_map(lines[source_line])
+        dest_manim_map = make_manim_map(lines[dest_line])
+        
+        
         self.show_and_replace(
             self.code.code.chars[source_line][
-                source_manim_map[span[0]] : source_manim_map[span[1]]
+                source_manim_map[slice(*source_col)]
             ],
             self.code.code.chars[dest_line][
-                dest_manim_map[span2[0]] : dest_manim_map[span2[1]]
+                dest_manim_map[slice(*dest_col)]
             ],
             direction,
-            color=self.COLORS[self.color_index],
+            color=self.color,
         )
         self.color_index += 1
-
-        st = (
-            st[: dest_match.start(1)]
-            + st[source_match.start(1) : source_match.end(1)]
-            + st[dest_match.end(1) :]
+        
+        lines = LineColEditor(self.code.code_string)
+        lines[dest_line][slice(*dest_col)] = lines[source_line][slice(*source_col)]
+        self.update(str(lines))
+        
+    def show_from_regex(self, source_re, dest_re, alternative_dest=None):
+        source_match, source_line, span = regex_line_span(
+            source_re, self.code.code_string
         )
+        dest_match, dest_line, span2 = regex_line_span(dest_re, self.code.code_string)
 
-        self.update(st)
+        direction = self.decide_directions(source_line, span, dest_line, span2)
+
+        self.show_from_spans(source_line, span, dest_line, span2)
 
     def from_to_chars(self, chars1, chars2, direction, color="#FFFFFF"):
         rect1 = SurroundingRectangle(chars1, color=color)
